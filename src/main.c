@@ -1,5 +1,12 @@
 #include <snes.h>
 
+/* BRR SFX blobs + handles */
+extern char sfx_coin, sfx_coin_end;
+extern char sfx_gameover, sfx_gameover_end;
+brrsamples SFX_COIN_HANDLE;
+brrsamples SFX_GAMEOVER_HANDLE;
+
+
 /* BG font from your existing assets */
 extern char tilfont, palfont;
 
@@ -75,6 +82,8 @@ static int wait_restart_or_quit(void) {
         if ((pad & KEY_START) && (pad & KEY_SELECT)) return RES_QUIT;
         if ((pad & KEY_START) && !(prev & KEY_START)) return RES_RESTART;
         prev = pad;
+        /* Keep SPC700 commands flowing during wait screen */
+        spcProcess();
         WaitForVBlank();
     }
 }
@@ -117,6 +126,8 @@ static int play_round(void) {
 
     hud_score(score); hud_time(timeLeft);
 
+    spcProcess();
+
     while (1) {
         pad = padsCurrent(0);
         if ((pad & KEY_START) && (pad & KEY_SELECT)) return RES_QUIT;
@@ -126,6 +137,7 @@ static int play_round(void) {
             timeLeft--; hud_time(timeLeft);
             if (!timeLeft) {
                 consoleDrawText(8, (MIN_Y + MAX_Y) / 2, "TIME UP!  GAME OVER");
+                spcPlaySound(1);
                 return wait_restart_or_quit();
             }
         }
@@ -155,6 +167,8 @@ static int play_round(void) {
             oamSetXY(SPR_COIN_ID, tx2px(cx), ty2py(cy));
             if (timeLeft < 60 * 60 - 60) timeLeft += 60;
             hud_time(timeLeft);
+            /* play BRR #0 (coin) */
+            spcPlaySound(0);
         }
 
         /* enemy move (greedy, throttled) */
@@ -176,11 +190,14 @@ static int play_round(void) {
 
             if (ex == px && ey == py) {
                 consoleDrawText(7, (MIN_Y + MAX_Y) / 2, "CAUGHT BY X!  GAME OVER");
+                spcPlaySound(1);
                 return wait_restart_or_quit();
             }
         }
 
         /* PVSnesLib pushes OAM during VBlank; just wait */
+        /* Process SPC700 command queue each frame so SFX play correctly */
+        spcProcess();
         WaitForVBlank();
     }
 }
@@ -199,6 +216,27 @@ int main(void) {
     setMode(BG_MODE1, 0);
     bgSetDisable(1); bgSetDisable(2);
     setScreenOn();
+
+    /* ---- SPC / BRR init ---- */
+    spcBoot();                       /* upload sound driver to SPC700 */
+    spcStop();
+
+    /* Reserve APU RAM blocks for BRR playback (39 ~= 10 KB is plenty for short SFX) */
+    spcAllocateSoundRegion(39);
+
+    /* Register two BRR samples into the driver */
+    spcSetSoundEntry(
+        15, 15, 4,
+        (u16)(&sfx_gameover_end - &sfx_gameover),
+        (u8*)&sfx_gameover,
+        &SFX_GAMEOVER_HANDLE
+    );
+    spcSetSoundEntry(
+        15, 15, 4,
+        (u16)(&sfx_coin_end - &sfx_coin),  /* size in bytes */
+        (u8*)&sfx_coin,
+        &SFX_COIN_HANDLE
+    );
 
     while (1) {
         int r = play_round();
