@@ -1,0 +1,8 @@
+[objects]
+./src/main.obj
+data.obj
+hdr.obj
+/home/darabat/coding/SNES/pvsneslib_440_64b_linux/pvsneslib/pvsneslib/lib/LoROM_SlowROM/crt0_snes.obj
+/home/darabat/coding/SNES/pvsneslib_440_64b_linux/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libc.obj
+/home/darabat/coding/SNES/pvsneslib_440_64b_linux/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libm.obj
+/home/darabat/coding/SNES/pvsneslib_440_64b_linux/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libtcc.obj
