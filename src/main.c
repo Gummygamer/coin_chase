@@ -1,6 +1,10 @@
 #include <snes.h>
 
-extern char tilfont, palfont;          /* from data.asm incbins */
+/* BG font from your existing assets */
+extern char tilfont, palfont;
+
+/* NEW: sprite sheet (see data.asm) */
+extern char sprgfx, sprgfx_end, sprpal;
 
 /* -------------------- helpers -------------------- */
 static u16 rng = 0xACE1u;
@@ -13,9 +17,16 @@ static s16 sgn(s16 v) { return (v > 0) - (v < 0); }
 #define MIN_Y 5
 #define MAX_Y 24
 
-#define ENEMY_CHAR 'X'
+/* sprite system
+   - PVSnesLib wants OAM ids 0,4,8,... (each sprite uses 4 bytes)  */
+#define SPR_PLAYER_ID 0
+#define SPR_COIN_ID   4
+#define SPR_ENEMY_ID  8
 
-static void put_char(u16 x, u16 y, char c) { consoleDrawText(x, y, "%c", c); }
+/* gfx offsets inside sprites.pic (8x8 tiles) */
+#define GFX_PLAYER 0
+#define GFX_COIN   1
+#define GFX_ENEMY  2
 
 static void hud_init(void) {
     consoleDrawText(2, 1, "COIN CHASE (SNES)");
@@ -29,28 +40,22 @@ static void hud_time(u16 frames_left) {
 }
 
 static void draw_border(void) {
-    char line[33];
-    int i, y;
-    for (i = 0; i < 32; i++) line[i] = '#';
-    line[32] = 0;
+    char line[33]; int i, y;
+    for (i = 0; i < 32; i++) line[i] = '#'; line[32] = 0;
     consoleDrawText(0, MIN_Y - 1, line);
     consoleDrawText(0, MAX_Y + 1, line);
-    for (y = MIN_Y; y <= MAX_Y; y++) {
-        consoleDrawText(0,  y, "#");
-        consoleDrawText(31, y, "#");
-    }
+    for (y = MIN_Y; y <= MAX_Y; y++) { consoleDrawText(0, y, "#"); consoleDrawText(31, y, "#"); }
 }
 
-/* clear inside the arena (keep border) */
 static void clear_inside(void) {
-    char blanks[31];
-    int i, y;
-    for (i = 0; i < 30; i++) blanks[i] = ' ';
-    blanks[30] = 0;
+    char blanks[31]; int i, y; for (i = 0; i < 30; i++) blanks[i] = ' '; blanks[30] = 0;
     for (y = MIN_Y; y <= MAX_Y; y++) consoleDrawText(1, y, blanks);
 }
 
-/* random tile not equal to (ax,ay) */
+/* grid <-> pixel (use 8x8 grid; sprites are 8x8) */
+static inline u16 tx2px(s16 tx) { return (u16)(tx * 8); }
+static inline u16 ty2py(s16 ty) { return (u16)(ty * 8); }
+
 static void rand_tile_avoid(s16 *rx, s16 *ry, s16 ax, s16 ay) {
     do {
         *rx = MIN_X + (rnd16() % (MAX_X - MIN_X + 1));
@@ -68,32 +73,36 @@ static int wait_restart_or_quit(void) {
     while (1) {
         pad = padsCurrent(0);
         if ((pad & KEY_START) && (pad & KEY_SELECT)) return RES_QUIT;
-        if ((pad & KEY_START) && !(prev & KEY_START)) return RES_RESTART; /* rising edge */
+        if ((pad & KEY_START) && !(prev & KEY_START)) return RES_RESTART;
         prev = pad;
         WaitForVBlank();
     }
 }
 
-/* one full round; returns RES_RESTART or RES_QUIT */
+/* one round using sprites */
 static int play_round(void) {
-    /* fresh HUD + arena */
-    hud_init();
-    draw_border();
-    clear_inside();
+    /* HUD + arena on BG */
+    hud_init(); draw_border(); clear_inside();
 
-    /* state */
-    u16 score = 0;
-    u16 pad = 0, prev = 0;
+    /* --- SPRITES setup -------------------------------------------------- */
+    /* load sprite GFX+PAL to VRAM; set global OBJ size to 8x8/16x16 */
+    oamInitGfxSet((u8*)&sprgfx, (u16)(&sprgfx_end - &sprgfx), (u8*)&sprpal, 16, 0, 0x0000, OBJ_SIZE8_L16);
+    /* define the 3 sprites (priority 3 = above BG) */
+    oamSet(SPR_PLAYER_ID, 0, 0, 3, 0, 0, GFX_PLAYER, 0);
+    oamSetEx(SPR_PLAYER_ID, OBJ_SMALL, OBJ_SHOW);
+    oamSet(SPR_COIN_ID,   0, 0, 3, 0, 0, GFX_COIN, 0);
+    oamSetEx(SPR_COIN_ID,   OBJ_SMALL, OBJ_SHOW);
+    oamSet(SPR_ENEMY_ID,  0, 0, 3, 0, 0, GFX_ENEMY, 0);
+    oamSetEx(SPR_ENEMY_ID,  OBJ_SMALL, OBJ_SHOW);
+
+    /* --- game state ----------------------------------------------------- */
+    u16 score = 0, pad = 0;
     u8  moveCooldown = 0;
-    u16 timeLeft = 60 * 60; /* 60s at ~60fps */
+    u16 timeLeft = 60 * 60; /* 60s @ ~60fps */
 
-    s16 px = (MIN_X + MAX_X) / 2;
-    s16 py = (MIN_Y + MAX_Y) / 2;
-
-    s16 cx, cy;           /* coin    */
-    s16 ex, ey;           /* enemy   */
-    u8  enemyTick = 0;    /* rate    */
-    const u8 ENEMY_RATE = 6;
+    s16 px = (MIN_X + MAX_X) / 2,  py = (MIN_Y + MAX_Y) / 2;
+    s16 cx, cy, ex, ey;               /* coin & enemy (grid coords) */
+    u8  enemyTick = 0;  const u8 ENEMY_RATE = 6;
 
     s16 nx, ny, dx, dy, stepx, stepy;
 
@@ -101,46 +110,39 @@ static int play_round(void) {
     rand_tile_avoid(&ex, &ey, px, py);
     while (ex == cx && ey == cy) rand_tile_avoid(&ex, &ey, px, py);
 
-    put_char(px, py, '@');
-    put_char(cx, cy, '*');
-    put_char(ex, ey, ENEMY_CHAR);
+    /* position sprites */
+    oamSetXY(SPR_PLAYER_ID, tx2px(px), ty2py(py));
+    oamSetXY(SPR_COIN_ID,   tx2px(cx), ty2py(cy));
+    oamSetXY(SPR_ENEMY_ID,  tx2px(ex), ty2py(ey));
 
-    hud_score(score);
-    hud_time(timeLeft);
+    hud_score(score); hud_time(timeLeft);
 
     while (1) {
         pad = padsCurrent(0);
-
-        /* quit mid-round */
         if ((pad & KEY_START) && (pad & KEY_SELECT)) return RES_QUIT;
 
         /* timer */
-        if (timeLeft > 0) {
-            timeLeft--;
-            hud_time(timeLeft);
-            if (timeLeft == 0) {
+        if (timeLeft) {
+            timeLeft--; hud_time(timeLeft);
+            if (!timeLeft) {
                 consoleDrawText(8, (MIN_Y + MAX_Y) / 2, "TIME UP!  GAME OVER");
                 return wait_restart_or_quit();
             }
         }
 
-        /* player move (throttled) */
-        if (moveCooldown) {
-            moveCooldown--;
-        } else {
+        /* player move (grid) */
+        if (moveCooldown) moveCooldown--;
+        else {
             nx = px; ny = py;
             if (pad & KEY_LEFT)  nx--;
             if (pad & KEY_RIGHT) nx++;
             if (pad & KEY_UP)    ny--;
             if (pad & KEY_DOWN)  ny++;
-
             if (nx < MIN_X) nx = MIN_X; if (nx > MAX_X) nx = MAX_X;
             if (ny < MIN_Y) ny = MIN_Y; if (ny > MAX_Y) ny = MAX_Y;
-
             if (nx != px || ny != py) {
-                put_char(px, py, ' ');
                 px = nx; py = ny;
-                put_char(px, py, '@');
+                oamSetXY(SPR_PLAYER_ID, tx2px(px), ty2py(py));
                 moveCooldown = 3;
             }
         }
@@ -148,39 +150,29 @@ static int play_round(void) {
         /* collect coin */
         if (px == cx && py == cy) {
             score++; hud_score(score);
-            put_char(cx, cy, ' ');
             rand_tile_avoid(&cx, &cy, px, py);
             while (cx == ex && cy == ey) rand_tile_avoid(&cx, &cy, px, py);
-            put_char(cx, cy, '*');
+            oamSetXY(SPR_COIN_ID, tx2px(cx), ty2py(cy));
             if (timeLeft < 60 * 60 - 60) timeLeft += 60;
             hud_time(timeLeft);
         }
 
         /* enemy move (greedy, throttled) */
-        enemyTick++;
-        if (enemyTick >= ENEMY_RATE) {
+        if (++enemyTick >= ENEMY_RATE) {
             enemyTick = 0;
             dx = px - ex; dy = py - ey;
             stepx = sgn(dx); stepy = sgn(dy);
             nx = ex; ny = ey;
 
             if (dx*dx >= dy*dy) {
-                if (ex + stepx >= MIN_X && ex + stepx <= MAX_X &&
-                    !(ex + stepx == cx && ey == cy)) { nx = ex + stepx; ny = ey; }
-                else if (ey + stepy >= MIN_Y && ey + stepy <= MAX_Y &&
-                         !(ex == cx && ey + stepy == cy)) { nx = ex; ny = ey + stepy; }
+                if (ex + stepx >= MIN_X && ex + stepx <= MAX_X && !(ex + stepx == cx && ey == cy)) { nx = ex + stepx; }
+                else if (ey + stepy >= MIN_Y && ey + stepy <= MAX_Y && !(ex == cx && ey + stepy == cy)) { ny = ey + stepy; }
             } else {
-                if (ey + stepy >= MIN_Y && ey + stepy <= MAX_Y &&
-                    !(ex == cx && ey + stepy == cy)) { nx = ex; ny = ey + stepy; }
-                else if (ex + stepx >= MIN_X && ex + stepx <= MAX_X &&
-                         !(ex + stepx == cx && ey == cy)) { nx = ex + stepx; ny = ey; }
+                if (ey + stepy >= MIN_Y && ey + stepy <= MAX_Y && !(ex == cx && ey + stepy == cy)) { ny = ey + stepy; }
+                else if (ex + stepx >= MIN_X && ex + stepx <= MAX_X && !(ex + stepx == cx && ey == cy)) { nx = ex + stepx; }
             }
 
-            if (nx != ex || ny != ey) {
-                if (!(ex == cx && ey == cy)) put_char(ex, ey, ' ');
-                ex = nx; ey = ny;
-                put_char(ex, ey, ENEMY_CHAR);
-            }
+            if (nx != ex || ny != ey) { ex = nx; ey = ny; oamSetXY(SPR_ENEMY_ID, tx2px(ex), ty2py(ey)); }
 
             if (ex == px && ey == py) {
                 consoleDrawText(7, (MIN_Y + MAX_Y) / 2, "CAUGHT BY X!  GAME OVER");
@@ -188,14 +180,14 @@ static int play_round(void) {
             }
         }
 
-        prev = pad;
+        /* PVSnesLib pushes OAM during VBlank; just wait */
         WaitForVBlank();
     }
 }
 
 /* -------------------- entry -------------------- */
 int main(void) {
-    /* one-time console/BG init */
+    /* BG text console init (also sets up OAM internally) */
     consoleSetTextMapPtr(0x6800);
     consoleSetTextGfxPtr(0x3000);
     consoleSetTextOffset(0x0100);
@@ -205,18 +197,14 @@ int main(void) {
     bgSetMapPtr(0, 0x6800, SC_32x32);
 
     setMode(BG_MODE1, 0);
-    bgSetDisable(1);
-    bgSetDisable(2);
+    bgSetDisable(1); bgSetDisable(2);
     setScreenOn();
 
-    /* play forever until quit */
     while (1) {
         int r = play_round();
         if (r == RES_QUIT) break;
-        /* otherwise loop to restart with a clean arena */
     }
 
-    /* optional goodbye screen */
     consoleDrawText(8, (MIN_Y + MAX_Y) / 2, "Thanks for playing!");
     while (1) { WaitForVBlank(); }
     return 0;
